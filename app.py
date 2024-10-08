@@ -16,11 +16,6 @@ from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.linear_model import LogisticRegression
 
-models_dict = {
-    "Support Vector Machine (SVM)": "./models/SVM.pkl",
-    "Naive Bayes": "./models/NaiveBayes.pkl",
-    "Logistic Regression": "./models/LR.pkl"
-}
 
 max_single_audio_duration = 15000 # 15 seconds
 
@@ -307,7 +302,7 @@ def wav2vec_ml_detect(file_path, model_name, state, threshold=60, basic_output=F
 
         if final_result is None:
             raise Exception("Error in getting prediction result!")
-        print(f"Result type: {type(result)}; Result: {final_result}")
+        print(f"Result: {final_result}")
         result_message = f"[{current_time}] {model_name}: audio file is {final_result}"
         state.append(result_message)
         history = "\n".join(state)
@@ -317,6 +312,22 @@ def wav2vec_ml_detect(file_path, model_name, state, threshold=60, basic_output=F
     except Exception as e:
         print(f"Error during detection: {e}")
         return None, state
+
+# Loaded models for wav2vec
+models_dict = {
+    "Support Vector Machine (SVM)": "./models/SVM.pkl",
+    "Naive Bayes": "./models/NaiveBayes.pkl",
+    "Logistic Regression": "./models/LR.pkl"
+}
+
+
+# Examples (Reserved for wav2vec)
+w2m_examples = [
+    ["./examples/long-bonafide.mp3", "Support Vector Machine (SVM)", 60, "false", 3500, 12],  
+    ["./examples/long-spoof.flac", "Naive Bayes", 70, "true", 3000, 7], 
+    ["./examples/short-spoof.wav", "Support Vector Machine (SVM)", 80, "false", 4000, 10], 
+    ["./examples/short-bonafide.mp3", "Logistic Regression", 85, "false", 2500, 4], 
+]
 
 # Interface
 with gr.Blocks(title="Audio deepfake detection UI") as demo:
@@ -329,43 +340,21 @@ with gr.Blocks(title="Audio deepfake detection UI") as demo:
 
             with gr.Row():
                 with gr.Column():
-                        file_upload = gr.File(label="Mp3/FLAC/WAV audio files only!")
-                        model_names = [k for k, _ in models_dict.items()]   
-                        selected_model = gr.Dropdown(label="Downstream Classifiers model", choices=model_names, value=model_names[0])
-                        with gr.Accordion("Advanced settings", open=False):
-                            gr.Markdown("Modifies a handful of the pipeline process of the model's prediction.")
-                            with gr.Row():
-                                gr.Markdown("""
-                                    This section is for handling audio files larger than the maximum limit of 15 seconds. 
-                                    <br /><br />For minimum duration, it refers to the preservation of the final audio split or edge cases, wherein it removes / ignore the splitted audio when it's lower than the set minimum duration.
-                                    """)
-                                with gr.Group():
-                                    split_seconds_slider = gr.Slider(
-                                        minimum=2, maximum=15, label="Split into seconds. Must be less than the maximum audio length of 15 seconds.", value=12, step=1, interactive=True)
-                                    min_duration_slider = gr.Slider(
-                                        minimum=0, maximum=5000, label="Minimum duration in Milliseconds", value=3500, step=100, interactive=True)
-                            with gr.Row():
-                                with gr.Row():
-                                    use_nuanced_result = gr.Radio(
-                                        label="Use binary result?",
-                                        choices=["true", "false"], value="false", interactive=True)
-                                with gr.Column(scale=2):
-                                    threshold_activation_slider = gr.Slider(
-                                    minimum=60, maximum=100, label="Audio Deepfake Classification Threshold", value=60, step=1, interactive=True)
-                            with gr.Row():
-                                gr.Markdown("""
-                                    Defaults to false, leading to a percentage result.
-                                    * Binary - bonafide or spoof.
-                                    * Percentage - 65.00 percent spoof, 100.00 percent bonafide.
-                                    * undetermined when both the values of 1 and 0 are equal. 
-                                """)
-                            with gr.Row():
-                                gr.Markdown(""" 
-                                The Threshold slider is only used when using binary result!
-                                """)
-                                
+                    file_upload = gr.File(label="Audio files only!")
+                    model_names = [k for k, _ in models_dict.items()]   
+                    selected_model = gr.Dropdown(label="Downstream Classifiers model", choices=model_names, value=model_names[0])
+                    with gr.Accordion("Advanced settings", open=False):
+                        gr.Markdown("Modifies a handful of the pipeline process of the model's prediction.")
+                        with gr.Row():
+                            gr.Markdown("""This section is for handling audio files larger than the maximum limit of 15 seconds.""")
+                            with gr.Group():
+                                split_seconds_slider = gr.Slider(minimum=2, maximum=15, label="Split into seconds", value=12, step=1, interactive=True)
+                                min_duration_slider = gr.Slider(minimum=0, maximum=5000, label="Minimum duration in Milliseconds", value=3500, step=100, interactive=True)
+                        with gr.Row():
+                            use_nuanced_result = gr.Radio(label="Use binary result?", choices=["true", "false"], value="false", interactive=True)
+                            threshold_activation_slider = gr.Slider(minimum=60, maximum=100, label="Audio Deepfake Classification Threshold", value=60, step=1, interactive=True)
                 with gr.Row():
-                        history = gr.Textbox(label="History", interactive=False, value="...", elem_classes="fill_height")
+                    history = gr.Textbox(label="History", interactive=False, value="...", info="No history will be logged when an unexpected file is uploaded!", elem_classes="fill_height")
                 
             predict_btn = gr.Button("Detect", variant="primary")
 
@@ -382,6 +371,21 @@ with gr.Blocks(title="Audio deepfake detection UI") as demo:
                 ],
                 outputs=[history, results_St],
             )
+
+            gr.Examples(
+                label="Examples",
+                examples=w2m_examples, 
+                cache_examples=False,
+                inputs=[
+                    file_upload,
+                    selected_model,
+                    threshold_activation_slider,  
+                    use_nuanced_result,           
+                    min_duration_slider,         
+                    split_seconds_slider        
+                ],
+            )
+
         with gr.TabItem("SpecRNet"):
             gr.Audio()
             
