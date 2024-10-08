@@ -325,7 +325,7 @@ models_dict = {
 w2m_examples = [
     ["./examples/long-bonafide.mp3", "Support Vector Machine (SVM)", 60, "false", 3500, 12],  
     ["./examples/long-spoof.flac", "Naive Bayes", 70, "true", 3000, 7], 
-    ["./examples/short-spoof.wav", "Support Vector Machine (SVM)", 80, "false", 4000, 10], 
+    ["./examples/short-spoof.wav", "Support Vector Machine (SVM)", 80, "true", 4000, 10], 
     ["./examples/short-bonafide.mp3", "Logistic Regression", 85, "false", 2500, 4], 
 ]
 
