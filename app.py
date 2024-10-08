@@ -149,7 +149,7 @@ class EmbedModel:
         self.model = model
         self.intermediate_embedding_layer = intermediate_embedding_layer
         self.layer_index = layer_index 
-        self.single_audio_limit = single_audio_limit  # Max 15 seconds in milliseconds
+        self.single_audio_limit = single_audio_limit  # Max 15 seconds in milliseconds, change when there process is killed during audio_representation!
 
     def audio_representation(self, file_path):
         data, sr = sf.read(file_path)
@@ -212,7 +212,7 @@ class EmbedModel:
             print(f"Error loading / splitting audio file: {e}")
             return None 
 
-    def complete_embedding(self, file_path):
+    def complete_embedding(self, file_path, split_seconds=12, min_duration=3500):
         try:
             if os.path.isfile(file_path):
                 # Load audio using Pydub
@@ -221,7 +221,7 @@ class EmbedModel:
                 print(f"{file_path}: {audio_duration / 1000} seconds")
 
                 if audio_duration > self.single_audio_limit:
-                    return self.split_audio(audio, file_path)
+                    return self.split_audio(audio, file_path, split_seconds, min_duration)
 
                 # Process the audio directly if it's shorter than the limit
                 representation_layers = self.audio_representation(file_path)
@@ -245,8 +245,9 @@ wav2vecM = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h", output_a
 
 embedModel = EmbedModel(processor=wav2vecP, model=wav2vecM)
 
-def detect(file_path, model_name, state, threshold=60, basic_output=False):
+def detect(file_path, model_name, state, threshold=60, basic_output=False, min_duration=3500, split_seconds=12):
     try:
+        basic_output = basic_output == "true"
         # Naive bayes requires all 768 features but if SVM / LR it only uses 10 important features
         features = ['feature_122', 'feature_283', 'feature_663', 'feature_276', 'feature_349', 
                     'feature_343', 'feature_129', 'feature_566', 'feature_102', 'feature_494']
@@ -259,7 +260,7 @@ def detect(file_path, model_name, state, threshold=60, basic_output=False):
             raise Exception("No file uploaded!")
             
         # Get audio representation
-        X_pred = embedModel.complete_embedding(file_path)
+        X_pred = embedModel.complete_embedding(file_path, split_seconds=split_seconds, min_duration=min_duration)
         if X_pred is None:
             raise Exception("Error in getting feature representation!")
 
@@ -275,7 +276,7 @@ def detect(file_path, model_name, state, threshold=60, basic_output=False):
 
         # Make predictions
         result = model.predict(X_pred)
-
+        final_result = None
         # Check for edge cases
         if len(result) == 0:
             raise Exception("No predictions available.")
@@ -292,19 +293,22 @@ def detect(file_path, model_name, state, threshold=60, basic_output=False):
             result_percentage = (num_ones / len(result)) * 100  # Calculate percentage of 1s
 
             # Determine final result based on counts and threshold
-            if num_ones > num_zeros:
-                if basic_output:
+            if basic_output:
+                result_percentage = np.mean(result) * 100
+                if result_percentage >= threshold:
                     final_result = "bonafide"
                 else:
-                    final_result = f"{result_percentage:.2f}% bonafide"
-            elif num_zeros > num_ones:
-                if basic_output:
                     final_result = "spoof"
-                else:
-                    final_result = f"{100 - result_percentage:.2f}% spoof"
             else:
-                final_result = "undetermined"  # Equal numbers of 1s and 0s
+                if num_ones > num_zeros:
+                    final_result = f"{result_percentage:.2f}% bonafide"
+                elif num_ones == num_zeros:
+                    final_result = "undetermined"
+                else:
+                    final_result = f"{100 - result_percentage:.2f}% spoof" # Equal numbers of 1s and 0s
 
+        if final_result is None:
+            raise Exception("Error in getting prediction result!")
         print(f"Result type: {type(result)}; Result: {final_result}")
         result_message = f"[{current_time}] {model_name}: audio file is {final_result}"
         state.append(result_message)
@@ -325,20 +329,59 @@ with gr.Blocks(title="Audio deepfake detection UI") as demo:
         with gr.TabItem("wav2vec + ML"):
             results_St = gr.State([])
 
-            with gr.Group():
-                with gr.Row():
-                    with gr.Column():
+            with gr.Row():
+                with gr.Column():
                         file_upload = gr.File(label="Mp3/FLAC/WAV audio files only!")
                         model_names = [k for k, _ in models_dict.items()]   
                         selected_model = gr.Dropdown(label="Downstream Classifiers model", choices=model_names, value=model_names[0])
-                    with gr.Column():
+                        with gr.Accordion("Advanced settings", open=False):
+                            gr.Markdown("Modifies a handful of the pipeline process of the model's prediction.")
+                            with gr.Row():
+                                gr.Markdown("""
+                                    This section is for handling audio files larger than the maximum limit of 15 seconds. 
+                                    <br /><br />For minimum duration, it refers to the preservation of the final audio split or edge cases, wherein it removes / ignore the splitted audio when it's lower than the set minimum duration.
+                                    """)
+                                with gr.Group():
+                                    split_seconds_slider = gr.Slider(
+                                        minimum=2, maximum=15, label="Split into seconds. Must be less than the maximum audio length of 15 seconds.", value=12, step=1, interactive=True)
+                                    min_duration_slider = gr.Slider(
+                                        minimum=0, maximum=5000, label="Minimum duration in Milliseconds", value=3500, step=100, interactive=True)
+                            with gr.Row():
+                                with gr.Row():
+                                    use_nuanced_result = gr.Radio(
+                                        label="Use binary result?",
+                                        choices=["true", "false"], value="false", interactive=True)
+                                with gr.Column(scale=2):
+                                    threshold_activation_slider = gr.Slider(
+                                    minimum=60, maximum=100, label="Audio Deepfake Classification Threshold", value=60, step=1, interactive=True)
+                            with gr.Row():
+                                gr.Markdown("""
+                                    Defaults to false, leading to a percentage result.
+                                    * Binary - bonafide or spoof.
+                                    * Percentage - 65.00 percent spoof, 100.00 percent bonafide.
+                                    * undetermined when both the values of 1 and 0 are equal. 
+                                """)
+                            with gr.Row():
+                                gr.Markdown(""" 
+                                The Threshold slider is only used when using binary result!
+                                """)
+                                
+                with gr.Row():
                         history = gr.Textbox(label="History", interactive=False, value="...", elem_classes="fill_height")
                 
             predict_btn = gr.Button("Detect", variant="primary")
 
             predict_btn.click(
                 fn=detect,
-                inputs=[file_upload, selected_model, results_St],
+                inputs=[
+                    file_upload,
+                    selected_model,
+                    results_St,
+                    threshold_activation_slider,  
+                    use_nuanced_result,           
+                    min_duration_slider,         
+                    split_seconds_slider        
+                ],
                 outputs=[history, results_St],
             )
         with gr.TabItem("SpecRNet"):
