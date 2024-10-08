@@ -236,8 +236,6 @@ class EmbedModel:
         except Exception as e:
             print(f"Failed to get feature representation due to {e}")
             return None
-class AudioSplit:
-    pass
 
 # Instantiation of embedModel.
 wav2vecP = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")  #code source https://huggingface.co/transformers/v4.6.0/_modules/transformers/models/wav2vec2/modeling_wav2vec2.html,  forward function
@@ -245,7 +243,7 @@ wav2vecM = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h", output_a
 
 embedModel = EmbedModel(processor=wav2vecP, model=wav2vecM)
 
-def detect(file_path, model_name, state, threshold=60, basic_output=False, min_duration=3500, split_seconds=12):
+def wav2vec_ml_detect(file_path, model_name, state, threshold=60, basic_output=False, min_duration=3500, split_seconds=12):
     try:
         basic_output = basic_output == "true"
         # Naive bayes requires all 768 features but if SVM / LR it only uses 10 important features
@@ -372,7 +370,7 @@ with gr.Blocks(title="Audio deepfake detection UI") as demo:
             predict_btn = gr.Button("Detect", variant="primary")
 
             predict_btn.click(
-                fn=detect,
+                fn=wav2vec_ml_detect,
                 inputs=[
                     file_upload,
                     selected_model,
