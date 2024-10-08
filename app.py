@@ -11,6 +11,10 @@ import joblib
 import datetime
 import os
 import torch
+import tempfile
+from sklearn.svm import SVC
+from sklearn.naive_bayes import GaussianNB
+from sklearn.linear_model import LogisticRegression
 
 models_dict = {
     "Support Vector Machine (SVM)": "./models/SVM.pkl",
@@ -140,23 +144,24 @@ class EmbedModel:
         intermediate_embedding_layer (bool) : representation layers. Default is True.
         layer_index (int) : specific intermediate layer to use. Default is 3.
     """
-    def __init__(self, processor, model, intermediate_embedding_layer=True, layer_index=3, single_audio_limit = max_single_audio_duration):
+    def __init__(self, processor, model, intermediate_embedding_layer=True, layer_index=3, single_audio_limit=15000):
         self.processor = processor
         self.model = model
         self.intermediate_embedding_layer = intermediate_embedding_layer
         self.layer_index = layer_index 
-        self.single_audio_limit = single_audio_limit # 15 seconds
+        self.single_audio_limit = single_audio_limit  # Max 15 seconds in milliseconds
 
-    def audio_representation(self, audio):
-        data, sr = sf.read(audio)
-        # Multiple channels
+    def audio_representation(self, file_path):
+        data, sr = sf.read(file_path)
+        
+        # If multiple channels, convert to mono
         if len(data.shape) > 1 and data.shape[1] > 1:
-            print("Multiple channels, converting to mono!")
+            print("Multiple channels detected, converting to mono!")
             data = data.mean(axis=1)
 
         float_arr = data.astype(float)
         print(f"Audio file is converted to float tensors of shape {float_arr.shape}")
-        input_values = self.processor(float_arr, return_tensors="pt").input_values # Batch size 1
+        input_values = self.processor(float_arr, return_tensors="pt").input_values  # Batch size 1
 
         if self.intermediate_embedding_layer:
             try:
@@ -168,50 +173,69 @@ class EmbedModel:
             hidden_state = self.model(input_values).last_hidden_state
 
         return hidden_state
-         
+        
+    def split_audio(self, audio, file_path, split_seconds=12, min_duration=3500):
+        try:
+            print("Splitting Audio into smaller segments!")
+            split_duration = split_seconds * 1000
+            df = pd.DataFrame(columns=[f"feature_{i}" for i in range(self.model.config.output_hidden_size)])
+            
+            # Determine the format from the file extension
+            file_format = os.path.splitext(file_path)[1][1:]  # Get the file extension without the dot
+            
+            for i in range(0, len(audio), split_duration):
+                audio_split = audio[i:i + split_duration]
+
+                if len(audio_split) < min_duration:
+                    print(f"Skipping segment due to short duration")  # Technically only occurs at the end.
+                    continue
+
+                representation_layers = None
+
+                # Create a temporary file with the same format as the original audio
+                with tempfile.NamedTemporaryFile(suffix=f".{file_format}", delete=True) as tmp_file:
+                    audio_split.export(tmp_file.name, format=file_format)
+                    representation_layers = self.audio_representation(tmp_file.name)
+
+                representation_layers = torch.mean(representation_layers[0], dim=0)
+                if representation_layers is None:
+                    raise Exception("Failed to get audio representation!")
+
+                row = pd.DataFrame(representation_layers.detach().numpy().reshape(1, -1), columns=df.columns)  # representation vectors stored as X
+                df = pd.concat([df, row], ignore_index=True)
+                print(f"Splitting {i} times.")
+            print("Successfully obtained audio splits features!")
+
+            return df
+
+        except Exception as e:
+            print(f"Error loading / splitting audio file: {e}")
+            return None 
+
     def complete_embedding(self, file_path):
         try:
             if os.path.isfile(file_path):
-                # Single file processing
+                # Load audio using Pydub
                 audio = AudioSegment.from_file(file_path)
                 audio_duration = len(audio)
-                print(f"{file_path}: {audio_duration} seconds")
-                
-                if (audio_duration > self.single_audio_limit):
-                    raise Exception(f"Audio file is longer than max single duration of {self.single_audio_limit / 1000} seconds. Audio is around {audio_duration / 1000} seconds!")
-                
-                # Initialize DataFrame only if the audio file passes the check
+                print(f"{file_path}: {audio_duration / 1000} seconds")
+
+                if audio_duration > self.single_audio_limit:
+                    return self.split_audio(audio, file_path)
+
+                # Process the audio directly if it's shorter than the limit
                 representation_layers = self.audio_representation(file_path)
 
                 # Compute the mean of representation layers and create a row
                 representation_layers = torch.mean(representation_layers[0], dim=0)
-                row = pd.DataFrame(representation_layers.detach().numpy().reshape(1, -1), 
-                                columns=[f"feature_{i}" for i in range(self.model.config.output_hidden_size)])
+                row = pd.DataFrame(representation_layers.detach().numpy().reshape(1, -1),
+                                   columns=[f"feature_{i}" for i in range(self.model.config.output_hidden_size)])
 
                 return row
-            else:
-                files_in_dir = os.listdir(file_path)
-                count = 0
-
-                file_names = [file for file in files_in_dir if os.path.isfile(os.path.join(file_path, file))]
-
-                df = pd.DataFrame(columns=[f"feature_{i}" for i in range(self.model.config.output_hidden_size)])
-
-                for file_name in file_names:
-                    count +=1
-                    print(f"-x-x-x-x-x- ID{count} file is processing -x-x-x-x-x-")
-                    representation_layers = self.audio_representation(file_name)
-
-                    representation_layers = torch.mean(representation_layers[0], dim=0) 
-                    row = pd.DataFrame(representation_layers.detach().numpy().reshape(1, -1), columns=df.columns) #representation vectors stored as X
-                    df = pd.concat([df, row], ignore_index=True)
-
-                return df
 
         except Exception as e:
             print(f"Failed to get feature representation due to {e}")
             return None
-
 class AudioSplit:
     pass
 
@@ -221,40 +245,76 @@ wav2vecM = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h", output_a
 
 embedModel = EmbedModel(processor=wav2vecP, model=wav2vecM)
 
-def detect(file_path, model_name, state):
+def detect(file_path, model_name, state, threshold=60, basic_output=False):
     try:
+        # Naive bayes requires all 768 features but if SVM / LR it only uses 10 important features
+        features = ['feature_122', 'feature_283', 'feature_663', 'feature_276', 'feature_349', 
+                    'feature_343', 'feature_129', 'feature_566', 'feature_102', 'feature_494']
+        
         state = state or []
         current_time = datetime.datetime.now().strftime("%H:%M")
-        # Split files first
-        if file_path == None:
+        
+        # Check if file_path is provided
+        if file_path is None:
             raise Exception("No file uploaded!")
             
-        # Audio representation
-        df = embedModel.complete_embedding(file_path)
-        if df is None:
-            raise Exception("issue regarding file_path or audio file duration. Check logs!")
+        # Get audio representation
+        X_pred = embedModel.complete_embedding(file_path)
+        if X_pred is None:
+            raise Exception("Error in getting feature representation!")
 
-        df.to_csv("features.csv",index=False)
         # Load Model & Predict
-        print(f"Using {model_name}")
+        print(f"Loading {model_name}...")
+        model = joblib.load(models_dict.get(model_name))
+        if model is None:
+            raise Exception(f"Failed to load {model_name}.")
         
-        result = f"[{current_time}] {model_name}: File name is Bonafide"
-        state.append(result)
+        if model_name != "Naive Bayes":
+            print("Using only 10 features.")
+            X_pred = X_pred[features]
+
+        # Make predictions
+        result = model.predict(X_pred)
+
+        # Check for edge cases
+        if len(result) == 0:
+            raise Exception("No predictions available.")
+        elif len(result) == 1:
+            confidence = 100 if result[0] == 1 else 0
+            if basic_output:
+                final_result = "bonafide" if result[0] == 1 else "spoof"
+            else:
+                final_result = f"{confidence}% bonafide" if result[0] == 1 else f"{confidence}% spoof"
+        else:
+            # Aggregate results based on threshold
+            num_ones = np.sum(result)
+            num_zeros = len(result) - num_ones
+            result_percentage = (num_ones / len(result)) * 100  # Calculate percentage of 1s
+
+            # Determine final result based on counts and threshold
+            if num_ones > num_zeros:
+                if basic_output:
+                    final_result = "bonafide"
+                else:
+                    final_result = f"{result_percentage:.2f}% bonafide"
+            elif num_zeros > num_ones:
+                if basic_output:
+                    final_result = "spoof"
+                else:
+                    final_result = f"{100 - result_percentage:.2f}% spoof"
+            else:
+                final_result = "undetermined"  # Equal numbers of 1s and 0s
+
+        print(f"Result type: {type(result)}; Result: {final_result}")
+        result_message = f"[{current_time}] {model_name}: audio file is {final_result}"
+        state.append(result_message)
         history = "\n".join(state)
 
-        # Once done, remove the generated files.
-        os.remove("features.csv")
         return history, state
 
     except Exception as e:
-        logging.error(f"Error in detection audio deepfake: {e}")
-        state = state or []
-        current_time = datetime.datetime.now().strftime("%H:%M")
-        result = f"[{current_time}] Failed attempt: {e}"
-        state.append(result)
-        history = "\n".join(state)
-
-        return history, state
+        print(f"Error during detection: {e}")
+        return None, state
 
 # Interface
 with gr.Blocks(title="Audio deepfake detection UI") as demo:
@@ -268,7 +328,7 @@ with gr.Blocks(title="Audio deepfake detection UI") as demo:
             with gr.Group():
                 with gr.Row():
                     with gr.Column():
-                        file_upload = gr.File(label="Upload Audio file")
+                        file_upload = gr.File(label="Mp3/FLAC/WAV audio files only!")
                         model_names = [k for k, _ in models_dict.items()]   
                         selected_model = gr.Dropdown(label="Downstream Classifiers model", choices=model_names, value=model_names[0])
                     with gr.Column():
