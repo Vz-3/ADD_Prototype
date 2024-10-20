@@ -6,15 +6,21 @@ import soundfile as sf
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
 from transformers import Wav2Vec2Processor, Wav2Vec2Model
+from pathlib import Path
 import logging
 import joblib 
 import datetime
 import os
 import torch
+import torchaudio
 import tempfile
 from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.linear_model import LogisticRegression
+
+from src.specrnet.specrnet import FrontendSpecRNet
+from src.specrnet.frontends import prepare_lfcc_double_delta, prepare_mfcc_double_delta
+
 
 
 max_single_audio_duration = 15000 # 15 seconds
@@ -320,7 +326,6 @@ models_dict = {
     "Logistic Regression": "./models/LR.pkl"
 }
 
-
 # Examples (Reserved for wav2vec)
 w2m_examples = [
     ["./examples/long-bonafide.mp3", "Support Vector Machine (SVM)", 60, "false", 3500, 12],  
@@ -329,12 +334,98 @@ w2m_examples = [
     ["./examples/short-bonafide.mp3", "Logistic Regression", 85, "false", 2500, 4], 
 ]
 
+
+# Model for specrnet
+srn_model_dict = {
+    "SpecRNet": "./models/SpecRNet/ckpt.pth"
+}
+
+devices = [
+    "cuda",
+    "cpu"
+]
+
+def initialize_specrnet(model_path, input_channels, device, frontend_algorithm):
+    global model  # Make model a global variable
+    model = FrontendSpecRNet(input_channels=input_channels, device=device, frontend_algorithm=frontend_algorithm).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+
+def preprocess_audio(file_path, device):
+    print(f"Processing file: {file_path}")
+    waveform, sample_rate = torchaudio.load(file_path)
+    print(f"Original waveform shape: {waveform.shape}, Sample rate: {sample_rate}")
+
+    # Resample to 16kHz if necessary
+    if sample_rate != 16000:
+        resample_transform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
+        waveform = resample_transform(waveform)
+        print(f"Resampled waveform shape: {waveform.shape}")
+
+    # Move waveform to device (GPU or CPU)
+    waveform = waveform.to(device)
+
+    return waveform
+
+def predict(file_path, device):
+    # Preprocess the audio
+    audio = preprocess_audio(file_path, device)
+
+    print(f"Input to model shape: {audio.shape}")
+
+    # Perform prediction
+    with torch.no_grad():
+        output = model(audio)  # Use the global model variable
+        prediction = torch.sigmoid(output).item()
+
+    print(f"Raw prediction value: {prediction}")
+
+    # Adjust the threshold for spoof classification
+    threshold = 0.9  # Experiment with different thresholds, e.g., 0.6, 0.7, 0.8, etc.
+
+    # Return the prediction as 'Spoof' or 'Bonafide' based on the adjusted threshold
+    return "Bonafide" if prediction > threshold else "Spoof"
+
+
+# SpecRNet detection function
+def specrnet_detect(file_path, model_name, input_channels, device, frontend_algorithm, state):
+    # Get the model path from the dictionary using the selected model name
+    model_path = srn_model_dict.get(model_name)
+    if model_path is None:
+        raise ValueError(f"Model {model_name} not found in the model dictionary.")
+
+    # Initialize the model
+    initialize_specrnet(model_path, input_channels, device, frontend_algorithm)
+    print(f"Model loaded from {model_path}")
+
+    state = state or []
+
+    try:
+        # Get prediction using the SpecRNet model
+        prediction = predict(file_path, device)
+        current_time = datetime.datetime.now().strftime("%H:%M")
+        result_message = f"[{current_time}] SpecRNet: audio file is {prediction}"
+        state.append(result_message)
+        history = "\n".join(state)
+
+        return history, state
+    except Exception as e:
+        logging.error(f"Error during SpecRNet detection: {e}")
+        state.append(f"Error: {e}")
+        history = "\n".join(state)
+        return history, state
+
+
+
+
 # Interface
-with gr.Blocks(title="Audio deepfake detection UI") as demo:
+# Gradio Interface Setup
+with gr.Blocks(title="Audio Deepfake Detection UI") as demo:
     gr.Markdown("## Audio Deepfake Classifier")
-    gr.Markdown("<br /> Description:<br /> Here lies lorem ipsum")
+    gr.Markdown("<br /> Description:<br /> This interface allows you to detect audio deepfakes using Wav2Vec2 + ML models or SpecRNet neural networks.")
 
     with gr.Tabs():
+        # Wav2Vec2 + ML Tab
         with gr.TabItem("wav2vec + ML"):
             results_St = gr.State([])
 
@@ -344,12 +435,11 @@ with gr.Blocks(title="Audio deepfake detection UI") as demo:
                     model_names = [k for k, _ in models_dict.items()]   
                     selected_model = gr.Dropdown(label="Downstream Classifiers model", choices=model_names, value=model_names[0])
                     with gr.Accordion("Advanced settings", open=False):
-                        gr.Markdown("Modifies a handful of the pipeline process of the model's prediction.")
+                        gr.Markdown("Modifies the pipeline process of the model's prediction.")
                         with gr.Row():
-                            gr.Markdown("""This section is for handling audio files larger than the maximum limit of 15 seconds.""")
-                            with gr.Group():
-                                split_seconds_slider = gr.Slider(minimum=2, maximum=15, label="Split into seconds", value=12, step=1, interactive=True)
-                                min_duration_slider = gr.Slider(minimum=0, maximum=5000, label="Minimum duration in Milliseconds", value=3500, step=100, interactive=True)
+                            gr.Markdown("This section is for handling audio files larger than the maximum limit of 15 seconds.")
+                            split_seconds_slider = gr.Slider(minimum=2, maximum=15, label="Split into seconds", value=12, step=1, interactive=True)
+                            min_duration_slider = gr.Slider(minimum=0, maximum=5000, label="Minimum duration in Milliseconds", value=3500, step=100, interactive=True)
                         with gr.Row():
                             use_nuanced_result = gr.Radio(label="Use binary result?", choices=["true", "false"], value="false", interactive=True)
                             threshold_activation_slider = gr.Slider(minimum=60, maximum=100, label="Audio Deepfake Classification Threshold", value=60, step=1, interactive=True)
@@ -360,15 +450,7 @@ with gr.Blocks(title="Audio deepfake detection UI") as demo:
 
             predict_btn.click(
                 fn=wav2vec_ml_detect,
-                inputs=[
-                    file_upload,
-                    selected_model,
-                    results_St,
-                    threshold_activation_slider,  
-                    use_nuanced_result,           
-                    min_duration_slider,         
-                    split_seconds_slider        
-                ],
+                inputs=[file_upload, selected_model, results_St, threshold_activation_slider, use_nuanced_result, min_duration_slider, split_seconds_slider],
                 outputs=[history, results_St],
             )
 
@@ -376,18 +458,67 @@ with gr.Blocks(title="Audio deepfake detection UI") as demo:
                 label="Examples",
                 examples=w2m_examples, 
                 cache_examples=False,
-                inputs=[
-                    file_upload,
-                    selected_model,
-                    threshold_activation_slider,  
-                    use_nuanced_result,           
-                    min_duration_slider,         
-                    split_seconds_slider        
-                ],
+                inputs=[file_upload, selected_model, threshold_activation_slider, use_nuanced_result, min_duration_slider, split_seconds_slider],
             )
 
+        # SpecRNet Tab
+        # file_path, model_path, input_channels, device, frontend_algorithm,
         with gr.TabItem("SpecRNet"):
-            gr.Audio()
+            srn_results_St = gr.State([])
+
+            with gr.Row():
+                with gr.Column():
+                    srn_file_upload = gr.File(label="Audio files only!")
+                    srn_model_names = [l for l, _ in srn_model_dict.items()]
+                    srn_selected_model = gr.Dropdown(label="Neural Network Classifier Model", choices=srn_model_names, value=srn_model_names[0])
+                    with gr.Accordion("View Model Configuration", open=False):
+                        gr.Markdown("Modifies the pipeline process of the model's prediction.")
+                        with gr.Row():
+                            input_channel_config = gr.Radio(label="Input Channel Used For Processing with LFCC", choices=[1], value=1, interactive=True)
+                        with gr.Row():
+                            # Choose device based on CUDA availability
+                            device_dropdown = gr.Dropdown(
+                                label="Device to use", 
+                                choices=devices, 
+                                value=devices[0] if torch.cuda.is_available() else devices[1]
+                            )
+                        with gr.Row():
+                            use_nuanced_result = gr.Radio(label="Use binary result?", choices=["true", "false"], value="false", interactive=True)
+                        with gr.Row():
+                            front_end_model_config = gr.Radio(label="Frontend Model Used", choices=["lfcc", "mfcc"], value="lfcc", interactive=False)
+
+                with gr.Row():
+                    srn_history = gr.Textbox(label="History", interactive=False, value="...", info="No history will be logged when an unexpected file is uploaded!", elem_classes="fill_height")
+
+            srn_predict_btn = gr.Button("Detect", variant="primary")
+
+            # Update srn_predict_btn.click to match the specrnet_detect function signature
+            srn_predict_btn.click(
+                fn=specrnet_detect,
+                inputs=[
+                    srn_file_upload,        # The uploaded file path
+                    srn_selected_model,     # The selected model name, used to get the path
+                    input_channel_config,   # Input channels for SpecRNet
+                    device_dropdown,        # The device to use (CUDA or CPU)
+                    front_end_model_config, # Frontend processing algorithm (e.g., "lfcc")
+                    srn_results_St          # Gradio State to keep track of history
+                ],
+                outputs=[srn_history, srn_results_St]
+            )
+
+
+            gr.Examples(
+                label="Examples",
+                examples=[
+                    ["./examples/long-bonafide.mp3"],  
+                    ["./examples/long-spoof.flac"], 
+                    ["./examples/short-spoof.wav"], 
+                    ["./examples/short-bonafide.mp3"]
+                ], 
+                cache_examples=False,
+                inputs=[srn_file_upload],
+            )
+                
             
         with gr.TabItem("Pre-processing"):
             gr.Markdown("Use the available methods to possibly increase the detection accuracy.")
