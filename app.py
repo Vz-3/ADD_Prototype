@@ -381,7 +381,7 @@ def predict(file_path, device):
     print(f"Raw prediction value: {prediction}")
 
     # Adjust the threshold for spoof classification
-    threshold = 0.9  # Experiment with different thresholds, e.g., 0.6, 0.7, 0.8, etc.
+    threshold = 0.7  # Experiment with different thresholds, e.g., 0.6, 0.7, 0.8, etc.
 
     # Return the prediction as 'Spoof' or 'Bonafide' based on the adjusted threshold
     return "Bonafide" if prediction > threshold else "Spoof"
